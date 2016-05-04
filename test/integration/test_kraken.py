@@ -72,12 +72,21 @@ class TestKronaBase(object):
     def build_krona_db(cls):
         cls.data_dir = join(util.file.get_test_input_path(), 'TestKrakenViralMix')
         cls.db_dir = os.path.join(cls.data_dir, 'db')
+        tax_dir = join(cls.db_dir, 'taxonomy')
 
         db = tempfile.mkdtemp('krona_db')
         for d in TestKronaBase.TAXONOMY_FILES:
-            src = join(cls.db_dir, 'taxonomy', d)
+            src = join(tax_dir, d)
             dest = os.path.join(db, d)
             os.symlink(src, dest)
+
+        accession_dir = join(tax_dir, 'accession2taxid')
+        for accession_file in os.listdir(accession_dir):
+            if accession_file.endswith('.accession2taxid'):
+                src = join(accession_dir, accession_file)
+                # Accession files moved up one directory is for updateTaxonomy
+                dest = os.path.join(db, accession_file)
+                os.symlink(src, dest)
         cls.krona.create_db(db)
         return db
 

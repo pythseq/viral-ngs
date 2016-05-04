@@ -59,5 +59,5 @@ class Krona(tools.Tool):
         env['PATH'] = '{}:{}'.format(bin_path, env['PATH'])
 
         sh = join(self.opt, 'updateTaxonomy.sh')
-        cmd = [sh, '--local', os.path.abspath(db_dir)]
+        cmd = [sh, '--only-build', '--preserve', os.path.abspath(db_dir)]
         util.misc.run_and_print(cmd, env=env, check=True)
