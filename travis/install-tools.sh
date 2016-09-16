@@ -31,6 +31,11 @@ else
     cp requirements-conda.txt $HOME
 fi
 
+echo "Java version"
+which java
+java -version
+echo "JAVA_HOME: $JAVA_HOME"
+
 echo "Installing and validating bioinformatic tools"
 export CONDA_ENVS_PATH=tools/conda-cache:tools/conda-tools/default
 conda create -y -m -c bioconda -p tools/conda-tools/default --file $HOME/requirements-conda.txt python="$TRAVIS_PYTHON_VERSION"
@@ -38,5 +43,11 @@ conda create -y -m -c bioconda -p tools/conda-tools/default --file $HOME/require
 echo 'Sourcing default environment'
 source activate tools/conda-tools/default
 conda info -a # for debugging
+
+
+echo "Java version after activation"
+which java
+java -version
+echo "JAVA_HOME: $JAVA_HOME"
 
 ./install_tools.py
