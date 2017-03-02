@@ -667,6 +667,7 @@ def align_rna_metagenomics(
     outBam=None,
     dupeLca=None,
     outLca=None,
+    minScore=None,
     sensitive=None,
     JVMmemory=None,
     numThreads=None,
@@ -703,9 +704,12 @@ def align_rna_metagenomics(
     dupe_removal_out_metrics = util.file.mkstempfname('.metrics')
     pic = tools.picard.MarkDuplicatesTool()
     pic.execute([aln_bam], aln_bam_deduped, dupe_removal_out_metrics, picardOptions=opts, JVMmemory=JVMmemory)
-    os.unlink(aln_bam)
 
-    sam_lca_report(tax_db, aln_bam_deduped, outReport=outReport, outLca=outLca)
+
+    os.unlink(aln_bam)
+    aln_bam_dd_sorted = util.file.mkstempfname('.bam')
+    samtools.sort(aln_bam_deduped, aln_bam_dd_sorted, args=['-n'], threads=numThreads)
+    sam_lca_report(tax_db, aln_bam_dd_sorted, outReport=outReport, outLca=outLca)
 
     if not outBam:
         os.unlink(aln_bam_deduped)
@@ -743,6 +747,8 @@ def parser_align_rna_metagenomics(parser=argparse.ArgumentParser()):
     parser.add_argument('--outBam', help='Output aligned, indexed BAM file. Default is to write to temp.')
     parser.add_argument('--outLca', help='Output LCA assignments for each read.')
     parser.add_argument('--dupeLca', help='Output LCA assignments for each read including duplicates.')
+    parser.add_argument('--minScore', type=int, default=35, help='Minimum alignment score to consider read.')
+    parser.add_argument('--minTopScore', type=int, default=75, help='Minimum top alignment score to consider taxon.')
     parser.add_argument('--numThreads', default=1, help='Number of threads (default: %(default)s)')
     parser.add_argument(
         '--JVMmemory',
