@@ -277,7 +277,7 @@ class SamRead(object):
 
 def sam_lca_scan(db, sam_file, output=None, top_percent=10, unique_only=True,
                  min_score=None, min_top_score=None,
-                 scan_score_min=30):
+                 scan_score_min=30, report_scores=None):
     ''' Calculate the LCA taxonomy id for multi-mapped reads in a samfile.
 
     Assumes the sam is sorted by query name. Writes tsv output: query_id \t tax_id.
@@ -294,6 +294,10 @@ def sam_lca_scan(db, sam_file, output=None, top_percent=10, unique_only=True,
     Return:
       (collections.Counter) Counter of taxid hits
     '''
+    if report_scores is None:
+        report_scores = [35, 50, 75, 100]
+
+
     reads = []
     tax_reads = collections.defaultdict(list)
 
@@ -320,13 +324,9 @@ def sam_lca_scan(db, sam_file, output=None, top_percent=10, unique_only=True,
             if min_score is not None:
                 hits = (hit for hit in hits if hit.get_tag('AS') >= min_score)
 
-            hits = list(hits)
-            # Sort requires realized list
-            # hits.sort(key=lambda sam1: sam1.get_tag('AS'), reverse=True)
-
             if not hits:
-                log.warn('Query has no alignments above score cutoff. Best score: %s',
-                         best_score)
+                log.warn('Query has no alignments above score cutoff, %s Best score: %s',
+                         query_name, best_score)
                 continue
             # hit_reads = []
             read = SamRead()
@@ -341,13 +341,14 @@ def sam_lca_scan(db, sam_file, output=None, top_percent=10, unique_only=True,
             reads.append(read)
             read_i += 1
 
-            # reads.append(read)
     tax_leaders = [(v, k) for k, v in tax_leaders.items()]
     heapq.heapify(tax_leaders)
+    n_taxons = {}
+
     for scan_score in range(scan_score_min, sup_best_score):
         c = collections.Counter()
         while tax_leaders[0] < (scan_score, 0):
-            tax_id, _ = heapq.heappop(tax_leaders)
+            score, tax_id = heapq.heappop(tax_leaders)
 
             for del_i, _ in tax_reads[tax_id]:
                 read = reads[del_i]
@@ -355,20 +356,23 @@ def sam_lca_scan(db, sam_file, output=None, top_percent=10, unique_only=True,
 
             del tax_reads[tax_id]
 
-        # for tax_id, hits in tax_reads.items():
-        #     for hit in hits:
-        #         reads[hit[0]].append((tax_id, hit[1]))
-
         for read in reads:
-            # tax_ids = [hit[0] for hit in hits]
             lca = read.coverage_lca(db.parents)
+            # tax_ids = [hit[0] for hit in hits]
             # lca = coverage_lca(tax_ids, db.parents)
             if lca is None or lca == 0:
-                log.warn('Query has no alignments above score cutoff. Tax IDs: %s',
-                         read)
+                pass
+                # log.warn('Query has no alignments above score cutoff. Tax IDs: %s',
+                #          read.hits)
             else:
                 c[lca] += 1
-        print('LCA Threshold %s, %s' % (scan_score, c))
+        # print('LCA Threshold %s, %s' % (scan_score, c))
+        n_taxons[scan_score] = len(c)
+        if scan_score in report_scores:
+            for line in kraken_dfs_report(db, c):
+                print(line)
+            # print(line, file=f)
+
     # for scan_score in range(scan_score_min, sup_best_score):
     #     c = collections.Counter()
     #     while tax_leaders[0] < (scan_score, 0):
@@ -389,6 +393,8 @@ def sam_lca_scan(db, sam_file, output=None, top_percent=10, unique_only=True,
     #             c[lca] += 1
     #     print('LCA Threshold %s, %s' % (scan_score, c))
 
+    for scan_score in range(scan_score_min, sup_best_score):
+        print('LCA Threshold: %s, %s' % (scan_score, n_taxons[scan_score]))
     return c
 
 
@@ -555,7 +561,7 @@ def coverage_lca(query_ids, parents, lca_percent=100):
         while query_id != 1:
             path.append(query_id)
             if parents.get(query_id, 0) == 0:
-                log.warn('Parent for query id: {} missing'.format(query_id))
+                log.warn('Parent for path missing: {}'.format(path))
                 break
             query_id = parents[query_id]
         if query_id == 1:
