@@ -20,6 +20,7 @@ import queue
 import shutil
 import sys
 
+import matplotlib
 import pysam
 
 import util.cmd
@@ -275,34 +276,53 @@ class SamRead(object):
         return self.lca
 
 
-def sam_lca_scan(db, sam_file, output=None, top_percent=10, unique_only=True,
-                 min_score=None, min_top_score=None,
-                 scan_score_min=30, report_scores=None):
-    ''' Calculate the LCA taxonomy id for multi-mapped reads in a samfile.
+class ScoredReads(object):
+    def __init__(self, reads):
+        self.reads = reads
 
-    Assumes the sam is sorted by query name. Writes tsv output: query_id \t tax_id.
+    def lca_scan_counter(self, db, scan_score_min=30):
+        tax_leaders = [(v, k) for k, v in self.tax_leaders.items()]
+        heapq.heapify(tax_leaders)
+        n_taxons = {}
 
-    Args:
-      db: (TaxonomyDb) Taxonomy db.
-      sam_file: (path) Sam file.
-      output: (io) Output file.
-      top_percent: (float) Only this percent within top hit are used.
-      unique_only: (bool) If true, only output assignments for unique, mapped reads. If False, set unmapped or duplicate reads as unclassified.
-      min_score: (int) Minimum alignment score to consider.
-      min_top_score: (int) Minimum top score to keep taxon.
+        for scan_score in range(scan_score_min, self.best_score):
+            c = collections.Counter()
+            while tax_leaders[0] < (scan_score, 0):
+                score, tax_id = heapq.heappop(tax_leaders)
 
-    Return:
-      (collections.Counter) Counter of taxid hits
-    '''
-    if report_scores is None:
-        report_scores = [35, 50, 75, 100]
+                for del_i, _ in self.tax_reads[tax_id]:
+                    read = self.reads[del_i]
+                    read.hits = set([hit for hit in read.hits if hit[0] != tax_id])
+
+                del self.tax_reads[tax_id]
+
+            for read in self.reads:
+                lca = read.coverage_lca(db.parents)
+                if lca is None or lca == 0:
+                    log.debug('Query has no alignments above score cutoff. Tax IDs: %s',
+                            read.hits)
+                else:
+                    c[lca] += 1
+            yield scan_score, c
+
+    def lca_scores(self, db, scan_score_min=30):
+        tax_dist = collections.defaultdict(list)
+        for read in self.reads:
+            max_score = max([hit.score for hit in read.hits])
+            lca = read.coverage_lca(db.parents)
+            if lca is None or lca == 0:
+                log.debug('Query has no alignments above score cutoff. Tax IDs: %s',
+                        read.hits)
+            else:
+                tax_dist[lca].append(max_score)
+        return tax_dist
 
 
+def sam_read_scores(sam_file, min_score=None, top_percent=None):
     reads = []
     tax_reads = collections.defaultdict(list)
 
     sup_best_score = 0
-    # tax_leaders = queue.PriorityQueue()
     tax_leaders = collections.defaultdict(int)
     read_i = 0
     reads = []
@@ -328,84 +348,45 @@ def sam_lca_scan(db, sam_file, output=None, top_percent=10, unique_only=True,
                 log.warn('Query has no alignments above score cutoff, %s Best score: %s',
                          query_name, best_score)
                 continue
-            # hit_reads = []
             read = SamRead()
             for hit in hits:
                 tax_id = extract_tax_id(hit)
                 score = hit.get_tag('AS')
                 tax_reads[tax_id].append((read_i, score))
-                # hit_reads.append((tax_id, score))
                 read.add_hit(tax_id, score)
                 if score > tax_leaders[tax_id]:
                     tax_leaders[tax_id] = score
             reads.append(read)
             read_i += 1
+    scored = ScoredReads(reads)
+    scored.tax_reads = tax_reads
+    scored.best_score = sup_best_score
+    scored.tax_leaders = tax_leaders
+    return scored
 
-    tax_leaders = [(v, k) for k, v in tax_leaders.items()]
-    heapq.heapify(tax_leaders)
-    n_taxons = {}
 
-    for scan_score in range(scan_score_min, sup_best_score):
-        c = collections.Counter()
-        while tax_leaders[0] < (scan_score, 0):
-            score, tax_id = heapq.heappop(tax_leaders)
-
-            for del_i, _ in tax_reads[tax_id]:
-                read = reads[del_i]
-                read.hits = set([hit for hit in read.hits if hit[0] != tax_id])
-
-            del tax_reads[tax_id]
-
-        for read in reads:
-            lca = read.coverage_lca(db.parents)
-            # tax_ids = [hit[0] for hit in hits]
-            # lca = coverage_lca(tax_ids, db.parents)
-            if lca is None or lca == 0:
-                pass
-                # log.warn('Query has no alignments above score cutoff. Tax IDs: %s',
-                #          read.hits)
-            else:
-                c[lca] += 1
-        # print('LCA Threshold %s, %s' % (scan_score, c))
-        n_taxons[scan_score] = len(c)
-        if scan_score in report_scores:
-            for line in kraken_dfs_report(db, c):
-                print(line)
-            # print(line, file=f)
-
-    # for scan_score in range(scan_score_min, sup_best_score):
-    #     c = collections.Counter()
-    #     while tax_leaders[0] < (scan_score, 0):
-    #         tax_id, _ = heapq.heappop(tax_leaders)
-    #         del tax_reads[tax_id]
-
-    #     for tax_id, hits in tax_reads.items():
-    #         for hit in hits:
-    #             reads[hit[0]].append((tax_id, hit[1]))
-
-    #     for hits in reads.values():
-    #         tax_ids = [hit[0] for hit in hits]
-    #         lca = coverage_lca(tax_ids, db.parents)
-    #         if lca is None or lca == 0:
-    #             log.warn('Query has no alignments above score cutoff. Tax IDs: %s',
-    #                      tax_ids)
-    #         else:
-    #             c[lca] += 1
-    #     print('LCA Threshold %s, %s' % (scan_score, c))
-
-    for scan_score in range(scan_score_min, sup_best_score):
-        print('LCA Threshold: %s, %s' % (scan_score, n_taxons[scan_score]))
-    return c
 
 
 def lca_scan(taxDb, input, outReport, format=None, minScore=None,
-               minTopScore=None, numThreads=None):
+             minTopScore=None, numThreads=None, reportScores=None,
+             topPercent=None):
+    if reportScores is None:
+        reportScores = [35, 50, 75, 100]
 
     tax_db = TaxonomyDb(tax_dir=taxDb, load_names=True, load_nodes=True)
     ext = os.path.splitext(input)[1]
     if ext in ('.sam', '.bam'):
-        sam_lca_scan(tax_db, input, outReport, unique_only=None,
-                     min_score=minScore, min_top_score=minTopScore)
+        scores = sam_read_scores(
+            input,
+            min_score=minScore, top_percent=topPercent)
+
+    for scan_score, taxon_counts in scores.lca_scan_counter(tax_db):
+        if scan_score in reportScores:
+            print('DFS report for score threshold: %s' % scan_score)
+            for line in kraken_dfs_report(tax_db, taxon_counts):
+                print(line)
+
+
 
 
 def parser_lca_scan(parser=argparse.ArgumentParser()):
@@ -413,6 +394,7 @@ def parser_lca_scan(parser=argparse.ArgumentParser()):
     parser.add_argument('input', help='Input aligned reads, BAM format.')
     parser.add_argument('outReport', help='Output taxonomy report.')
     parser.add_argument('-f', '--format', help='Input format')
+    parser.add_argument('--topPercent', type=int, default=33, help='Minimum alignment score to consider read.')
     parser.add_argument('--minScore', type=int, default=35, help='Minimum alignment score to consider read.')
     parser.add_argument('--minTopScore', type=int, default=75, help='Minimum top alignment score to consider taxon.')
     parser.add_argument('--numThreads', default=1, help='Number of threads (default: %(default)s)')
