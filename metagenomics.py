@@ -253,7 +253,7 @@ def sam_lca(db, sam_file, output=None, top_percent=10, unique_only=True,
             c[tax_id].append(max_score)
     return c
 
-TaxHit = collections.namedtuple('TaxHit', ['taxid', 'score'])
+TaxHit = collections.namedtuple('TaxHit', ['taxid', 'score', 'flag'])
 
 class SamRead(object):
 
@@ -263,8 +263,8 @@ class SamRead(object):
         self.lca = None
         self.lca_len = 0
 
-    def add_hit(self, taxid, score):
-        self.hits.add(TaxHit(taxid, score))
+    def add_hit(self, taxid, score, flag):
+        self.hits.add(TaxHit(taxid, score, flag))
 
     def coverage_lca(self, parents):
         lca_len = len(self.hits)
@@ -280,8 +280,29 @@ class ScoredReads(object):
     def __init__(self, reads):
         self.reads = reads
 
-    def lca_scan_counter(self, db, scan_score_min=30):
-        tax_leaders = [(v, k) for k, v in self.tax_leaders.items()]
+    def output_scores(self, tax_db, out_f):
+        with open(out_f, 'wt') as f:
+            for tax_id, reads in self.tax_reads.items():
+                tax_name = tax_db.names[tax_id]
+
+                scores = '\t'.join([str(score) for read_i, score in reads])
+
+                print('{}\t{}\t{}'.format(tax_name, str(tax_id), scores), file=f)
+
+    def lca_scan_counter(self, db, scan_score_min=30, proper_pair=None):
+        tax_leaders = {}
+        for tax_id, hit_scores in self.lca_scores(db, proper_pair=proper_pair).items():
+            tax_leaders[tax_id] = max(hit_scores)
+
+        tax_no_support = set(self.tax_reads.keys()) - set(tax_leaders.keys())
+        for tax_id in tax_no_support:
+            for del_i, _ in self.tax_reads[tax_id]:
+                read = self.reads[del_i]
+                read.hits = set([hit for hit in read.hits if hit[0] != tax_id])
+
+            del self.tax_reads[tax_id]
+
+        tax_leaders = [(v, k) for k, v in tax_leaders.items()]
         heapq.heapify(tax_leaders)
         n_taxons = {}
 
@@ -300,30 +321,33 @@ class ScoredReads(object):
                 lca = read.coverage_lca(db.parents)
                 if lca is None or lca == 0:
                     log.debug('Query has no alignments above score cutoff. Tax IDs: %s',
-                            read.hits)
+                              read.hits)
                 else:
                     c[lca] += 1
             yield scan_score, c
 
-    def lca_scores(self, db, scan_score_min=30):
+    def lca_scores(self, db, proper_pair=False):
         tax_dist = collections.defaultdict(list)
         for read in self.reads:
+            if proper_pair:
+                both_hits = [hit for hit in read.hits if hit.flag & 0x2 and not (hit.flag & 0x8)]
+            if not read.hits:
+                continue
             max_score = max([hit.score for hit in read.hits])
             lca = read.coverage_lca(db.parents)
             if lca is None or lca == 0:
                 log.debug('Query has no alignments above score cutoff. Tax IDs: %s',
-                        read.hits)
+                          read.hits)
             else:
                 tax_dist[lca].append(max_score)
         return tax_dist
 
 
-def sam_read_scores(sam_file, min_score=None, top_percent=None):
+def sam_read_scores(sam_file, min_score=None, top_percent=None, min_mapq=None):
     reads = []
     tax_reads = collections.defaultdict(list)
 
     sup_best_score = 0
-    tax_leaders = collections.defaultdict(int)
     read_i = 0
     reads = []
     with pysam.AlignmentFile(sam_file, 'rb') as sam:
@@ -332,7 +356,7 @@ def sam_read_scores(sam_file, min_score=None, top_percent=None):
             segs = list(seg_group)
             query_name = segs[0].query_name
             # 0x4 is unmapped, 0x400 is duplicate
-            mapped_segs = [seg for seg in segs if seg.flag & 0x4 == 0 and seg.flag & 0x400 == 0]
+            mapped_segs = [seg for seg in segs if seg.flag & 0x4 == 0 and seg.flag & 0x400 == 0 and seg.mapq >= min_mapq]
             if not mapped_segs:
                 continue
 
@@ -353,15 +377,12 @@ def sam_read_scores(sam_file, min_score=None, top_percent=None):
                 tax_id = extract_tax_id(hit)
                 score = hit.get_tag('AS')
                 tax_reads[tax_id].append((read_i, score))
-                read.add_hit(tax_id, score)
-                if score > tax_leaders[tax_id]:
-                    tax_leaders[tax_id] = score
+                read.add_hit(tax_id, score, hit.flag)
             reads.append(read)
             read_i += 1
     scored = ScoredReads(reads)
     scored.tax_reads = tax_reads
     scored.best_score = sup_best_score
-    scored.tax_leaders = tax_leaders
     return scored
 
 
@@ -369,6 +390,7 @@ def sam_read_scores(sam_file, min_score=None, top_percent=None):
 
 def lca_scan(taxDb, input, outReport, format=None, minScore=None,
              minTopScore=None, numThreads=None, reportScores=None,
+             minMapq=None, properPair=None,
              topPercent=None):
     if reportScores is None:
         reportScores = [35, 50, 75, 100]
@@ -378,9 +400,11 @@ def lca_scan(taxDb, input, outReport, format=None, minScore=None,
     if ext in ('.sam', '.bam'):
         scores = sam_read_scores(
             input,
-            min_score=minScore, top_percent=topPercent)
+            min_score=minScore, top_percent=topPercent, min_mapq=minMapq)
 
-    for scan_score, taxon_counts in scores.lca_scan_counter(tax_db):
+    scores.output_scores(tax_db, outReport)
+
+    for scan_score, taxon_counts in scores.lca_scan_counter(tax_db, proper_pair=properPair):
         if scan_score in reportScores:
             print('DFS report for score threshold: %s' % scan_score)
             for line in kraken_dfs_report(tax_db, taxon_counts):
@@ -394,8 +418,10 @@ def parser_lca_scan(parser=argparse.ArgumentParser()):
     parser.add_argument('input', help='Input aligned reads, BAM format.')
     parser.add_argument('outReport', help='Output taxonomy report.')
     parser.add_argument('-f', '--format', help='Input format')
+    parser.add_argument('--properPair', action='store_true', help='Require a proper pair for the taxon leader.')
     parser.add_argument('--topPercent', type=int, default=33, help='Minimum alignment score to consider read.')
     parser.add_argument('--minScore', type=int, default=35, help='Minimum alignment score to consider read.')
+    parser.add_argument('--minMapq', type=int, default=0, help='Minimum mapping quality to consider read.')
     parser.add_argument('--minTopScore', type=int, default=75, help='Minimum top alignment score to consider taxon.')
     parser.add_argument('--numThreads', default=1, help='Number of threads (default: %(default)s)')
     util.cmd.common_args(parser, (('loglevel', None), ('version', None), ('tmp_dir', None)))
