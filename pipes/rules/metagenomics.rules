@@ -68,7 +68,9 @@ rule kraken:
     output: report=join(config["data_dir"], config["subdirs"]["metagenomics"], "{sample}.{adjective,raw|cleaned}.kraken.report"),
             reads=join(config["data_dir"], config["subdirs"]["metagenomics"], "{sample}.{adjective,raw|cleaned}.kraken.reads.gz")
     resources: cores=int(config.get("number_of_threads", 1)),
-               mem=120
+               mem=120,
+               kraken=1
+    priority: 1
     params: numThreads=str(config.get("number_of_threads", 1)),
             UGER=config.get('UGER_queues', {}).get('long', '-q long')
     shell:
